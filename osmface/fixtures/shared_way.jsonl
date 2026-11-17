@@ -1,0 +1,16 @@
+{"type":"node","id":1,"x":0,"y":0}
+{"type":"node","id":2,"x":10,"y":0}
+{"type":"node","id":3,"x":10,"y":10}
+{"type":"node","id":4,"x":0,"y":10}
+{"type":"node","id":14,"x":5,"y":0}
+{"type":"node","id":15,"x":5,"y":10}
+{"type":"way","id":11,"nodes":[1,14]}
+{"type":"way","id":12,"nodes":[14,15]}
+{"type":"way","id":13,"nodes":[15,4]}
+{"type":"way","id":14,"nodes":[1,4]}
+{"type":"way","id":15,"nodes":[14,2]}
+{"type":"way","id":16,"nodes":[3,2]}
+{"type":"way","id":17,"nodes":[3,15]}
+{"type":"relation","id":500,"members":[{"type":"way","ref":11,"role":"outer"},{"type":"way","ref":12,"role":"outer"},{"type":"way","ref":13,"role":"outer"},{"type":"way","ref":14,"role":"outer"}]}
+{"type":"relation","id":501,"members":[{"type":"way","ref":15,"role":"outer"},{"type":"way","ref":16,"role":"outer"},{"type":"way","ref":17,"role":"outer"},{"type":"way","ref":12,"role":"outer"}]}
+{"type":"relation","id":502,"members":[{"type":"way","ref":12,"role":"outer"},{"type":"way","ref":12,"role":"outer"}]}

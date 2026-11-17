@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "osmface"
+version = "1.0.0"
+description = "Offline OSM-style relation-to-polygon assembler (SQLite staging + Shapely)"
+requires-python = ">=3.10"
+dependencies = ["shapely>=2.0"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+osmface = "osmface.cli:main"
+
+[tool.setuptools]
+packages = ["osmface"]
