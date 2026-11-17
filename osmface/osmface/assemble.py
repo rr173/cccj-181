@@ -43,6 +43,36 @@ DEFAULT_MAX_BOUNDARY_WAYS = 100_000
 DEFAULT_MAX_BOUNDARY_NODES = 1_000_000
 
 
+# ---------------------------------------------------------------------------
+# storage seam: the same per-relation pipeline runs against the legacy
+# SQLite staging connection (full assemble) and against a revision view
+# (incremental history updates).  No geometry logic is duplicated.
+# ---------------------------------------------------------------------------
+
+def _way_ids_exist(store, ids) -> set:
+    if hasattr(store, "way_ids_exist"):
+        return store.way_ids_exist(ids)
+    return dbmod.way_ids_exist(store, ids)
+
+
+def _fetch_way_lengths(store, ids) -> dict:
+    if hasattr(store, "fetch_way_lengths"):
+        return store.fetch_way_lengths(ids)
+    return dbmod.fetch_way_lengths(store, ids)
+
+
+def _fetch_ways(store, ids, stats) -> dict:
+    if hasattr(store, "fetch_ways"):
+        return store.fetch_ways(ids, stats)
+    return dbmod.fetch_ways(store, ids, stats)
+
+
+def _fetch_nodes(store, ids, stats) -> dict:
+    if hasattr(store, "fetch_nodes"):
+        return store.fetch_nodes(ids, stats)
+    return dbmod.fetch_nodes(store, ids, stats)
+
+
 @dataclass(frozen=True)
 class Occ:
     """One way occurrence: way id + full member-index chain + final role."""
@@ -67,7 +97,7 @@ class Outcome:
 # per-relation resolution
 # ---------------------------------------------------------------------------
 
-def _resolve(conn, rid, relations, results, max_ways, max_nodes, stats) -> Outcome:
+def _resolve(store, rid, relations, results, max_ways, max_nodes, stats) -> Outcome:
     members = relations[rid]
     if not members:
         return Outcome(status=INCOMPLETE, reason={"code": "empty_relation"})
@@ -95,7 +125,7 @@ def _resolve(conn, rid, relations, results, max_ways, max_nodes, stats) -> Outco
                 gaps.append({**g, "path": [[rid, idx]] + g["path"]})
 
     way_refs = [m["ref"] for m in members if m["type"] == "way"]
-    existing_ways = dbmod.way_ids_exist(conn, way_refs)
+    existing_ways = _way_ids_exist(store, way_refs)
     for idx, m in enumerate(members):
         if m["type"] == "way" and m["ref"] not in existing_ways:
             gaps.append({"kind": "way", "id": m["ref"], "path": [[rid, idx]]})
@@ -112,7 +142,7 @@ def _resolve(conn, rid, relations, results, max_ways, max_nodes, stats) -> Outco
     # -- expansion with boundary-size limit --------------------------------
     occs: list[Occ] = []
     n_nodes = 0
-    lengths = dbmod.fetch_way_lengths(conn, way_refs)
+    lengths = _fetch_way_lengths(store, way_refs)
     for idx, m in enumerate(members):
         if m["type"] == "way":
             occs.append(Occ(m["ref"], ((rid, idx),), m["role"]))
@@ -134,11 +164,11 @@ def _resolve(conn, rid, relations, results, max_ways, max_nodes, stats) -> Outco
             )
 
     # -- fetch exactly this boundary's ways/nodes from the on-disk index ---
-    ways_nodes = dbmod.fetch_ways(conn, {o.way for o in occs}, stats)
+    ways_nodes = _fetch_ways(store, {o.way for o in occs}, stats)
     needed = set()
     for o in occs:
         needed.update(ways_nodes[o.way])
-    coords = dbmod.fetch_nodes(conn, needed, stats)
+    coords = _fetch_nodes(store, needed, stats)
     missing = set(needed) - set(coords)
     if missing:
         seen = set()
@@ -276,6 +306,16 @@ def assemble(conn, max_boundary_ways=DEFAULT_MAX_BOUNDARY_WAYS,
         raise StagingStateError(
             f"staging state is {staging!r}, expected 'loaded' — "
             "refusing to assemble from unusable input"
+        )
+    if dbmod.get_meta(conn, "history_enabled", False):
+        # history-enabled warehouses may only be updated through the
+        # revisioned change pipeline; the old full-overwrite entry point must
+        # never bypass revisions and clobber historical results
+        from .model import HistoryError
+
+        raise HistoryError(
+            "database is history-enabled: use the apply/change pipeline "
+            "instead of a full assemble overwrite"
         )
     relations = dbmod.fetch_relations(conn)
     graph = build_graph(relations)

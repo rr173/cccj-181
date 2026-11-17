@@ -16,8 +16,9 @@ from .assemble import (
     DEFAULT_MAX_BOUNDARY_WAYS,
     assemble,
 )
-from .export import export_package, read_manifest
-from .model import STATUSES
+from .export import export_package, export_revision, read_manifest
+from . import history as hist
+from .model import ABSENT, STATUSES
 
 
 def load_database(db_path: str, files, force: bool = False) -> dict:
@@ -55,10 +56,31 @@ def assemble_database(
 
 
 def inspect_database(db_path: str, relation_id: int | None = None,
-                     faults: bool = False) -> dict:
-    """Structured view over the staging database and assemble results."""
+                     faults: bool = False, revision: int | None = None) -> dict:
+    """Structured view over the staging database and assemble results.
+
+    On a history-enabled database, ``revision`` pins the whole query to one
+    revision: statuses, diagnostics, faces and provenance all come from that
+    same revision.  When omitted, the head revision is fixed once at query
+    start, so a concurrent commit can never mix old and new state.
+    """
     conn = dbmod.connect(db_path)
     try:
+        if hist.is_history_enabled(conn):
+            info = _history_overview(conn, revision)
+            if faults:
+                info["faults"] = dbmod.fetch_faults(conn)
+            if relation_id is not None:
+                info["relation"] = hist.inspect_relation(
+                    conn, info["revision"], relation_id
+                )
+            return info
+
+        if revision is not None:
+            raise hist.NotHistoryError(
+                "database is not history-enabled; revision queries require"
+                " enable_history() first"
+            )
         info = {
             "staging_state": dbmod.get_meta(conn, "staging_state"),
             "counts": dbmod.get_meta(conn, "counts"),
@@ -80,6 +102,60 @@ def inspect_database(db_path: str, relation_id: int | None = None,
         return info
     finally:
         conn.close()
+
+
+def _history_overview(conn, revision):
+    overview = hist.revision_overview(conn, revision)
+    pinned = overview["revision"]
+    info = {
+        "staging_state": dbmod.get_meta(conn, "staging_state"),
+        "history_enabled": True,
+        "revision": pinned,
+        "head_revision": overview["head_revision"],
+        "revision_identity": hist.revision_identity(conn, pinned),
+        "counts": overview["entity_counts"],
+        "fault_count": dbmod.get_meta(conn, "fault_count"),
+        "sources": dbmod.get_meta(conn, "sources", []),
+        "status_counts": {
+            s: overview["status_counts"].get(s, 0) for s in STATUSES
+        },
+        "absent_relations": overview["status_counts"].get(ABSENT, 0),
+        "relations": overview["relations"],
+        "batches": hist.list_batches(conn),
+    }
+    return info
+
+
+def enable_history(db_path: str) -> dict:
+    """Turn an existing loaded+assembled database into a revision 0 warehouse."""
+    return hist.enable_history(db_path)
+
+
+def apply_changes(db_path: str, change_file: str,
+                  sync: hist.SyncPoint | None = None) -> dict:
+    """Atomically apply a UTF-8 JSONL change batch; return its receipt."""
+    return hist.apply_changes(db_path, change_file, sync=sync)
+
+
+def get_receipt(db_path: str, batch_id: str) -> dict:
+    """Read the receipt of a previously committed batch."""
+    conn = hist.connect(db_path)
+    try:
+        return hist.get_receipt(conn, batch_id)
+    finally:
+        hist.close(conn)
+
+
+def export_revision_package(db_path: str, out_dir: str, revision: int | None = None,
+                            force: bool = False) -> dict:
+    """Export an immutable package bound to one revision."""
+    conn = hist.connect(db_path)
+    try:
+        if revision is None:
+            revision = hist.head_revision(conn)
+        return export_revision(conn, out_dir, revision, force=force)
+    finally:
+        hist.close(conn)
 
 
 def _relation_detail(conn, rid: int) -> dict | None:

@@ -66,7 +66,10 @@ def _cmd_inspect(args) -> int:
     if not args.db:
         print("inspect: a staging database path is required", file=sys.stderr)
         return EXIT_ERROR
-    info = api.inspect_database(args.db, relation_id=args.relation, faults=args.faults)
+    info = api.inspect_database(
+        args.db, relation_id=args.relation, faults=args.faults,
+        revision=args.revision,
+    )
     if args.json:
         _print_json(info)
         return EXIT_OK
@@ -74,18 +77,84 @@ def _cmd_inspect(args) -> int:
     return EXIT_OK
 
 
+def _cmd_enable_history(args) -> int:
+    summary = api.enable_history(args.db)
+    rev = summary.get("revision", 0)
+    note = " (idempotent, already enabled)" if summary.get("idempotent") else ""
+    print(f"enable-history: revision={rev}{note}")
+    if "relations" in summary:
+        print(f"  relations={summary['relations']} limits={summary['limits']}")
+    return EXIT_OK
+
+
+def _cmd_apply(args) -> int:
+    receipt = api.apply_changes(args.db, args.changes)
+    if args.json:
+        _print_json(receipt)
+        return EXIT_OK
+    print(
+        "apply: batch_id={bid} {base}->{rev} sha256={sha} changes={nch}".format(
+            bid=receipt["batch_id"],
+            base=receipt["base_revision"],
+            rev=receipt["revision"],
+            sha=receipt["input_sha256"][:12],
+            nch=len(receipt["changes"]),
+        )
+    )
+    print(f"  affected/recomputed relations: {receipt['recomputed_relations']}")
+    for rel in receipt["affected_relations"]:
+        print(
+            "  relation {rid}: {before} -> {after} geometry_changed={geo}"
+            " source_changed={src} basis={basis}".format(
+                rid=rel["relation"],
+                before=rel["status_before"],
+                after=rel["status_after"],
+                geo=rel["geometry_changed"],
+                src=rel["source_changed"],
+                basis=rel["basis"],
+            )
+        )
+    return EXIT_OK
+
+
+def _cmd_receipt(args) -> int:
+    _print_json(api.get_receipt(args.db, args.batch_id))
+    return EXIT_OK
+
+
+def _cmd_export_revision(args) -> int:
+    revision = args.revision
+    manifest = api.export_revision_package(
+        args.db, args.out, revision=revision, force=args.force
+    )
+    print(
+        f"export-revision: {args.out} state={manifest['state']}"
+        f" revision={manifest['revision']} counts={manifest['counts']}"
+    )
+    return EXIT_OK
+
+
 def _print_human(info, args) -> None:
     print(f"staging_state: {info['staging_state']}")
-    print(f"counts: {info['counts']}  merged_duplicates: {info['merged_duplicates']}"
-          f"  faults: {info['fault_count']}")
-    if info.get("last_assemble"):
-        la = info["last_assemble"]
-        print(f"last_assemble: {la['assembled_at']} limits={la['limits']}"
-              f" fetched={la['fetched']}")
-    print(f"status_counts: {info['status_counts']}")
-    if info.get("last_output"):
-        lo = info["last_output"]
-        print(f"last_output: {lo['path']} state={lo['state']}")
+    if info.get("history_enabled"):
+        print(
+            f"history: revision={info['revision']} head={info['head_revision']}"
+            f" identity={info['revision_identity']}"
+        )
+        print(f"counts: {info['counts']}  absent_relations: {info['absent_relations']}")
+        print(f"status_counts: {info['status_counts']}")
+        print(f"batches: {[b['batch_id'] for b in info['batches']]}")
+    else:
+        print(f"counts: {info['counts']}  merged_duplicates: {info['merged_duplicates']}"
+              f"  faults: {info['fault_count']}")
+        if info.get("last_assemble"):
+            la = info["last_assemble"]
+            print(f"last_assemble: {la['assembled_at']} limits={la['limits']}"
+                  f" fetched={la['fetched']}")
+        print(f"status_counts: {info['status_counts']}")
+        if info.get("last_output"):
+            lo = info["last_output"]
+            print(f"last_output: {lo['path']} state={lo['state']}")
     if args.faults:
         for f in info.get("faults", []):
             print(f"  fault {f['kind']} {f['file']}:{f['line']}: {f['message']}")
@@ -95,7 +164,9 @@ def _print_human(info, args) -> None:
 
 
 def _print_relation(rel) -> None:
-    print(f"relation {rel['relation']}: status={rel['status']}")
+    rev = rel.get("revision")
+    prefix = f"relation {rel['relation']}" + (f" @rev{rev}" if rev is not None else "")
+    print(f"{prefix}: status={rel['status']} object_version={rel.get('object_version')}")
     if rel.get("reason"):
         print(f"  reason: {json.dumps(rel['reason'], sort_keys=True)}")
     for face in rel.get("faces") or []:
@@ -105,13 +176,15 @@ def _print_relation(rel) -> None:
             print(f"    ring {kind} role={ring['role']} nodes={ring['nodes']}")
             for seg in ring["segments"]:
                 print(
-                    "      way={way} path={path} reversed={rev} nodes={nodes}"
-                    " (definition {definition})".format(
+                    "      way={way}(v{wv}) path={path} reversed={rev} nodes={nodes}"
+                    " (definition {definition}, node_versions {nv})".format(
                         way=seg["way"],
+                        wv=seg.get("way_version", "?"),
                         path=seg["path"],
                         rev=seg["reversed"],
                         nodes=seg["nodes"],
                         definition=seg["way_definition_nodes"],
+                        nv=seg.get("node_versions"),
                     )
                 )
 
@@ -149,8 +222,39 @@ def build_parser() -> argparse.ArgumentParser:
     p_insp.add_argument("--relation", type=int, help="show one relation in detail")
     p_insp.add_argument("--faults", action="store_true", help="list load faults")
     p_insp.add_argument("--package", help="inspect an exported package directory")
+    p_insp.add_argument("--revision", type=int, default=None,
+                        help="pin the inspection to this revision (history dbs)")
     p_insp.add_argument("--json", action="store_true", help="machine-readable output")
     p_insp.set_defaults(func=_cmd_inspect)
+
+    p_en = sub.add_parser(
+        "enable-history",
+        help="enable revisioning on a loaded+assembled database (revision 0)",
+    )
+    p_en.add_argument("db", help="staging SQLite database path")
+    p_en.set_defaults(func=_cmd_enable_history)
+
+    p_ap = sub.add_parser("apply", help="apply a UTF-8 JSONL change batch")
+    p_ap.add_argument("db", help="history-enabled SQLite database path")
+    p_ap.add_argument("changes", help="JSONL change file (header + put/delete rows)")
+    p_ap.add_argument("--json", action="store_true", help="print the full receipt")
+    p_ap.set_defaults(func=_cmd_apply)
+
+    p_rc = sub.add_parser("receipt", help="read one committed batch receipt")
+    p_rc.add_argument("db", help="history-enabled SQLite database path")
+    p_rc.add_argument("batch_id", help="batch_id of the received batch")
+    p_rc.set_defaults(func=_cmd_receipt)
+
+    p_ex = sub.add_parser(
+        "export-revision", help="export an immutable package for one revision"
+    )
+    p_ex.add_argument("db", help="history-enabled SQLite database path")
+    p_ex.add_argument("out", help="output package directory")
+    p_ex.add_argument("--revision", type=int, default=None,
+                      help="revision to export (default: head)")
+    p_ex.add_argument("--force", action="store_true",
+                      help="replace an existing output package")
+    p_ex.set_defaults(func=_cmd_export_revision)
     return parser
 
 
