@@ -84,6 +84,59 @@ def _cmd_enable_history(args) -> int:
     print(f"enable-history: revision={rev}{note}")
     if "relations" in summary:
         print(f"  relations={summary['relations']} limits={summary['limits']}")
+    if summary.get("spatial_index"):
+        si = summary["spatial_index"]
+        print(
+            f"  spatial-index: rtree_rows={si['rtree_rows']}"
+            f" bypass_rows={si['bypass_rows']}"
+        )
+    return EXIT_OK
+
+
+def _print_spatial_result(result) -> None:
+    print(
+        "{kind}: revision={rev} (head={head}) candidates={cand}"
+        " (rtree={rt}, bypass={bp}) exact_checks={chk} hits={hits}".format(
+            kind=result["query"],
+            rev=result["revision"],
+            head=result["head_revision"],
+            cand=result["index"]["candidate_faces"],
+            rt=result["index"]["rtree_candidates"],
+            bp=result["index"]["bypass_candidates"],
+            chk=result["exact_checks"],
+            hits=result["hit_count"],
+        )
+    )
+    print(f"  params: {json.dumps(result['params'], sort_keys=True)}")
+    for hit in result["hits"]:
+        print(f"  relation {hit['relation_id']}: faces={hit['faces']}")
+
+
+def _cmd_query_point(args) -> int:
+    result = api.query_faces_at_point(
+        args.db, args.x, args.y, revision=args.revision
+    )
+    if args.json:
+        _print_json(result)
+        return EXIT_OK
+    _print_spatial_result(result)
+    return EXIT_OK
+
+
+def _cmd_query_range(args) -> int:
+    result = api.query_faces_in_range(
+        args.db, args.minx, args.miny, args.maxx, args.maxy,
+        revision=args.revision,
+    )
+    if args.json:
+        _print_json(result)
+        return EXIT_OK
+    _print_spatial_result(result)
+    return EXIT_OK
+
+
+def _cmd_spatial_index(args) -> int:
+    _print_json(api.spatial_index_info(args.db))
     return EXIT_OK
 
 
@@ -473,6 +526,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_en.add_argument("db", help="staging SQLite database path")
     p_en.set_defaults(func=_cmd_enable_history)
+
+    p_qp = sub.add_parser(
+        "query-point",
+        help="list complete faces covering a planar point at one revision",
+    )
+    p_qp.add_argument("db", help="history-enabled SQLite database path")
+    p_qp.add_argument("x", type=float, help="planar x coordinate (finite)")
+    p_qp.add_argument("y", type=float, help="planar y coordinate (finite)")
+    p_qp.add_argument("--revision", type=int, default=None,
+                      help="revision to query (default: head pinned at start)")
+    p_qp.add_argument("--json", action="store_true",
+                      help="machine-readable output")
+    p_qp.set_defaults(func=_cmd_query_point)
+
+    p_qr = sub.add_parser(
+        "query-range",
+        help="list complete faces intersecting a planar rectangle",
+    )
+    p_qr.add_argument("db", help="history-enabled SQLite database path")
+    p_qr.add_argument("minx", type=float, help="minimum x (finite)")
+    p_qr.add_argument("miny", type=float, help="minimum y (finite)")
+    p_qr.add_argument("maxx", type=float, help="maximum x (finite, >= minx)")
+    p_qr.add_argument("maxy", type=float, help="maximum y (finite, >= miny)")
+    p_qr.add_argument("--revision", type=int, default=None,
+                      help="revision to query (default: head pinned at start)")
+    p_qr.add_argument("--json", action="store_true",
+                      help="machine-readable output")
+    p_qr.set_defaults(func=_cmd_query_range)
+
+    p_si = sub.add_parser(
+        "spatial-index",
+        help="show per-revision spatial index build state",
+    )
+    p_si.add_argument("db", help="history-enabled SQLite database path")
+    p_si.set_defaults(func=_cmd_spatial_index)
 
     p_ap = sub.add_parser("apply", help="apply a UTF-8 JSONL change batch")
     p_ap.add_argument("db", help="history-enabled SQLite database path")

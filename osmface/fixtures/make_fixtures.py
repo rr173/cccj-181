@@ -200,6 +200,44 @@ def dup_conflict_records():
     return base_records() + [node(1, 0, 1)]
 
 
+def spatial_world_records():
+    """Hand-written world for historical spatial face queries.
+
+    All coordinates are exact integers; nothing here is scale-generated.
+
+        R (400): outer square (0,0)-(20,20) way 20 + inner hole
+                 (4,4)-(12,12) way 21 -> one face, area 400-64 = 336
+        I (800): independent island (6,6)-(10,10) way 22, area 16
+        U (600): disjoint square (40,40)-(50,50) way 23, area 100
+        V (700): overlapping square (15,15)-(25,25) way 24, area 100
+        M (900): two disjoint outer squares (ways 30, 31) -> MultiPolygon
+
+    Point (5,5) is inside R's hole and inside no other relation, so a hole
+    query must return an empty set despite the bbox candidate on R.
+    """
+    return [
+        node(20, 0, 0), node(21, 20, 0), node(22, 20, 20), node(23, 0, 20),
+        way(20, [20, 21, 22, 23, 20]),
+        node(24, 4, 4), node(25, 12, 4), node(26, 12, 12), node(27, 4, 12),
+        way(21, [24, 25, 26, 27, 24]),
+        rel(400, [wm(20, "outer"), wm(21, "inner")]),
+        node(28, 6, 6), node(29, 10, 6), node(30, 10, 10), node(31, 6, 10),
+        way(22, [28, 29, 30, 31, 28]),
+        rel(800, [wm(22, "outer")]),
+        node(32, 40, 40), node(33, 50, 40), node(34, 50, 50), node(35, 40, 50),
+        way(23, [32, 33, 34, 35, 32]),
+        rel(600, [wm(23, "outer")]),
+        node(36, 15, 15), node(37, 25, 15), node(38, 25, 25), node(39, 15, 25),
+        way(24, [36, 37, 38, 39, 36]),
+        rel(700, [wm(24, "outer")]),
+        node(40, 60, 60), node(41, 64, 60), node(42, 64, 64), node(43, 60, 64),
+        way(30, [40, 41, 42, 43, 40]),
+        node(44, 70, 70), node(45, 74, 70), node(46, 74, 74), node(47, 70, 74),
+        way(31, [44, 45, 46, 47, 44]),
+        rel(900, [wm(30, "outer"), wm(31, "outer")]),
+    ]
+
+
 def shared_child_records():
     """Sub-relation C is compiled once and used by two parents.
 
@@ -250,6 +288,7 @@ FIXTURES = {
     "bad_rings.jsonl": bad_rings_records,
     "dup_identical.jsonl": dup_identical_records,
     "dup_conflict.jsonl": dup_conflict_records,
+    "spatial_world.jsonl": spatial_world_records,
 }
 
 

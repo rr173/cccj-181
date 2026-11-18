@@ -19,6 +19,7 @@ from .assemble import (
 from .export import export_package, export_revision, read_manifest
 from . import history as hist
 from . import merge as mergemod
+from . import spatial
 from . import workcopy as wcmod
 from .model import ABSENT, STATUSES
 
@@ -131,6 +132,54 @@ def _history_overview(conn, revision):
 def enable_history(db_path: str) -> dict:
     """Turn an existing loaded+assembled database into a revision 0 warehouse."""
     return hist.enable_history(db_path)
+
+
+# ---------------------------------------------------------------------------
+# spatial face queries (point coverage / rectangle intersection)
+# ---------------------------------------------------------------------------
+
+def query_faces_at_point(db_path: str, x, y, revision: int | None = None) -> dict:
+    """Return the complete faces covering planar point (x, y).
+
+    When ``revision`` is omitted, the head revision observed at query start
+    is pinned for the whole query.  The spatial index only narrows the
+    candidate set; coverage is decided exactly with the Shapely geometry
+    stored at that revision (boundary counts as covered, hole interiors do
+    not).  Each relation appears once with all covering face indices.
+    """
+    conn = hist.connect(db_path)
+    try:
+        return spatial.query_point(conn, x, y, revision=revision)
+    finally:
+        hist.close(conn)
+
+
+def query_faces_in_range(db_path: str, minx, miny, maxx, maxy,
+                         revision: int | None = None) -> dict:
+    """Return the complete faces intersecting a planar rectangle.
+
+    Coordinates use the same planar x/y system as the stored geometry, must
+    all be finite and satisfy ``minx <= maxx`` / ``miny <= maxy`` (zero
+    width or height allowed).  Boundary contact counts as an intersection.
+    The head revision is pinned at query start when ``revision`` is omitted.
+    """
+    conn = hist.connect(db_path)
+    try:
+        return spatial.query_range(
+            conn, minx, miny, maxx, maxy, revision=revision
+        )
+    finally:
+        hist.close(conn)
+
+
+def spatial_index_info(db_path: str) -> dict:
+    """Per-revision spatial index build state (for inspection/audits)."""
+    conn = hist.connect(db_path)
+    try:
+        hist._require_history(conn)
+        return spatial.spatial_index_state(conn)
+    finally:
+        hist.close(conn)
 
 
 def apply_changes(db_path: str, change_file: str,

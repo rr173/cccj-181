@@ -203,6 +203,71 @@ pkg = osmface.export_revision_package("w.db", "out/r1", revision=1)
 （毫秒）可调锁等待，便于争用验收快速失败。合流确认（merge-confirm）使用同一
 同步点协议。
 
+## 历史面空间查询（点覆盖 / 矩形相交）
+
+分析人员的问题是“这个坐标落在哪些面里？”“这块范围与哪些面相交？”。已启用历史的
+数据仓在**已经生成并持久化的面**之上维护一套持久空间候选索引，查询直接读
+`face_history` 里该修订保存的 Shapely 几何，绝不重新装配 node/way/relation，也不
+修改任何修订。
+
+### 索引结构与维护边界
+
+- `face_rtree`（SQLite R-tree 虚拟表）+ 配套表 `face_rtree_rows`：按修订保存每个
+  完整面（含 MultiPolygon 的每个 face）的包围盒，覆盖洞与岛——索引的是完整面几何
+  的包围盒，精确判定仍交给 Shapely。
+- `face_rtree_bypass`：R-tree 坐标为 float32 精度，有限 float32 范围内 R-tree 一律
+  **向外舍入**，不会因向内舍入漏召回；当包围盒超出有限 float32 范围
+  （`|坐标| > 3.4028234663852886e38`，SQLite 会存成 `inf` 而无法被有限窗口命中）时，
+  该面改走旁路表，以真实 float64 包围盒参与候选。每修订的旁路行数记入
+  `spatial_index_meta.bypass_rows`，可审计；真实数据上预期始终为 0。
+- `spatial_index_meta`：每个修订一行，记录该修订的 R-tree/旁路行数与构建时间。
+
+启用历史时在同一事务里为修订 0 建好索引；此后每一次 apply 与离线副本合流确认
+（merge-confirm）产生的修订，都在**同一个成功提交事务**里增量写入该修订的索引。
+被删除、变为 `incomplete`/`topology_conflict` 或不再有面的关系在该修订没有任何索引
+行，因此不可能继续作为完整面命中；旧修订的索引行原样保留。索引写入失败会回滚整个
+修订，头修订、关系几何与索引版本不可能出现彼此不一致的可见状态。普通未启用历史的
+库行为完全不变，不建任何空间表，也不丢弃原始记录、装配结果或来源。
+
+### 查询语义
+
+```bash
+python3 -m osmface query-point w.db 8 8 --revision 0
+python3 -m osmface query-range w.db 20 -5 20 25 --json   # 零宽范围，允许
+python3 -m osmface spatial-index w.db
+```
+
+```python
+osmface.query_faces_at_point("w.db", 8.0, 8.0, revision=0)
+osmface.query_faces_in_range("w.db", 5.0, 5.0, 6.0, 6.0)  # 省略 revision
+osmface.spatial_index_info("w.db")
+```
+
+- 坐标使用既有平面 x/y；点与范围参数必须是有限数，范围满足 `minx <= maxx`、
+  `miny <= maxy`，零宽/零高范围允许。损坏参数、无效修订、未启用历史的库都返回明确
+  错误，绝不返回看似成功的空结果。
+- 点查询用 `covers`：落在面边界上算覆盖，洞内部不算覆盖，洞内的岛作为独立面正常
+  命中。范围查询用 `intersects`：与几何边界仅接触也算相交。
+- 一个关系有多个面时只返回一次该关系，并给出实际命中的 `faces` 索引；多关系重叠时
+  全部返回，不挑选“最佳”结果。结果按 relation id 稳定排序，并在返回体中说明固定的
+  `revision`、查询类型（`point`/`range`）与索引候选数量
+  （`candidate_faces`/`candidate_relations`、R-tree 与旁路分别的候选数、精确检查数
+  `exact_checks`、最终命中数 `hit_count`）。
+- 省略修订时，整个查询固定在调用开始时观察到的一份头修订上（查询在一个读事务快照
+  内完成）；查询依赖的索引候选与几何都来自同一修订，不会出现当前头索引搭配旧修订
+  几何的错配。
+
+### 两阶段判定：索引只缩小候选集合
+
+1. R-tree（加旁路表）按包围盒返回候选面；
+2. 只对候选面反序列化该修订实际保存的 Shapely 几何，执行精确 `covers`/`intersects`。
+
+包围盒相交从不直接当成面相交——洞内部与凹形空白的假命中全部在第二阶段消除。查询
+不会为每个请求扫描或反序列化全库几何：局部性由 `EXPLAIN QUERY PLAN`（R-tree 虚拟
+表索引 + 配套表 revision 索引，无 `face_history` 全表扫描）与 SQLite authorizer
+（原始 node/way/relation 载荷表完全不被打开）独立证明，见
+`tests/test_spatial_locality.py`。
+
 ## 离线工作副本与合流
 
 外业小组可以领取一份离线工作副本，断开主库独立修改、预览，回来后把资料包交给
@@ -350,6 +415,7 @@ python3 checks/demo_history.py                    # 修订仓端到端走查
 python3 checks/check_history.py                   # 鞋带公式 + 参考投影独立核对
 python3 checks/demo_merge.py                      # 离线合流端到端走查
 python3 checks/check_merge.py                     # 三方合并独立验收
+python3 checks/check_spatial.py                   # 历史面空间查询独立验收
 ```
 
 历史测试（`tests/test_history_*.py`）覆盖：启用前置条件与幂等、对象版本/墓碑/恢复、
@@ -366,6 +432,16 @@ python3 checks/check_merge.py                     # 三方合并独立验收
 `checks/check_merge.py` 是独立于生产合并判定代码的验收：手写 B/L/H 三列清单
 逐对象算期望，候选原始对象独立物料化后送入原装配器做几何对照。
 规模数据运行时生成，不入库。
+
+空间查询测试（`tests/test_spatial_queries.py`、`test_spatial_merge.py`、
+`test_spatial_locality.py`）覆盖：手写外方/洞/岛/不相交面/重叠面的逐点逐范围
+期望（含边界点、洞内部、零宽零高范围）、移动边界后旧修订冻结与新修订差异、
+apply 的删除/不完整/恢复与拓扑冲突离线索引、合流确认新增局部对象面与幂等重试、
+空结果与多关系重叠、非有限坐标与倒置范围等参数错误、无效修订与未启用历史的明确
+报错、R-tree float32 精度边界与有记录旁路、索引写失败整体回滚与恢复、查询期间
+并发提交的固定读修订，以及真实 R-tree 行/版本状态/几何结果的物理核对。
+`checks/check_spatial.py` 的独立参考不调用任何新空间查询或索引维护函数，只用
+手写坐标算术与经 `inspect` 读出的持久几何上的 Shapely 判定逐修订对照。
 
 基准夹具 `base.jsonl`：四个乱向 way 拼成 10×10 外方环（100），子关系 C 含
 outer 洞环 H（16）与 inner 小岛环 I（4），根关系以 inner 引用 C，于是 H 翻为
@@ -384,12 +460,14 @@ osmface/            # 包
   nesting.py        # 最小包含父环、角色交替、面构造
   assemble.py       # 缺口传播、展开（含共享子关系编译缓存）、限额、落库
   history.py        # 版本化实体/边/结果、原子 apply、反向依赖闭包、历史读
+  spatial.py        # 历史面持久 R-tree 候选索引（含精度旁路）与点/范围精确查询
   workcopy.py       # 离线工作副本：领取、编辑、预览、资料包导出
   merge.py          # 合流：包校验、三方方案、裁定、候选预览、原子确认
   export.py         # 入仓包与修订包状态机写出
   model.py          # 常量、异常、确定性测试同步点 SyncPoint
-  api.py / cli.py   # Python API 与 load/assemble/inspect/enable-history/apply 等命令
+  api.py / cli.py   # Python API 与 load/assemble/inspect/enable-history/apply/
+                    #   query-point/query-range/spatial-index 等命令
 fixtures/           # 小夹具 + 生成器（含规模数据生成器）
 checks/             # 端到端走查、独立参考投影与可复跑核对脚本
-tests/              # pytest 测试（含历史/局部性/并发/中止/独立对照）
+tests/              # pytest 测试（含历史/局部性/并发/中止/独立对照/空间查询）
 ```

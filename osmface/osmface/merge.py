@@ -1513,6 +1513,7 @@ def confirm_merge(db_path: str, plan_id: str, merge_id: str,
                 "affected_relations": receipt_relations,
                 "recomputed_relations": recomputed,
                 "fetched": fetched,
+                "spatial_index": dbmod.get_meta(conn, "spatial_index"),
                 "limits": {"ways": max_ways, "nodes": max_nodes},
             }
             conn.execute(

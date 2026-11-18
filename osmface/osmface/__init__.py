@@ -15,8 +15,11 @@ from .api import (
     list_merge_plans,
     load_database,
     merge_preview,
+    query_faces_at_point,
+    query_faces_in_range,
     save_merge_rulings,
     source_identity,
+    spatial_index_info,
     workcopy_edit,
     workcopy_export,
     workcopy_info,
@@ -40,6 +43,7 @@ from .model import (
     WorkcopyConflict,
     WorkcopyError,
 )
+from .spatial import SpatialQueryError
 
 __all__ = [
     "load_database",
@@ -52,6 +56,11 @@ __all__ = [
     "get_receipt",
     "export_revision_package",
     "SyncPoint",
+    # historical spatial face queries
+    "query_faces_at_point",
+    "query_faces_in_range",
+    "spatial_index_info",
+    "SpatialQueryError",
     # offline work copies and merge intake
     "source_identity",
     "checkout_workcopy",

@@ -40,6 +40,7 @@ import sqlite3
 from collections import deque
 
 from . import db as dbmod
+from . import spatial
 from .assemble import (
     Occ,
     Outcome,
@@ -325,8 +326,12 @@ def enable_history(db_path: str) -> dict:
                     conn, 0, rid, outcome,
                     _source_descriptor(outcome, rev0_view, 0),
                 )
+            # revision 0 gets its persistent spatial candidate index in the
+            # same transaction; a failure here rolls the whole enable back
+            spatial_summary = spatial.index_revision(conn, 0)
             dbmod.set_meta(conn, "history_enabled", True)
             dbmod.set_meta(conn, "history_head", 0)
+            dbmod.set_meta(conn, "spatial_index", spatial_summary)
             dbmod.set_meta(
                 conn,
                 "history_budget",
@@ -345,6 +350,7 @@ def enable_history(db_path: str) -> dict:
             "revision": 0,
             "relations": len(results),
             "limits": {"ways": max_ways, "nodes": max_nodes},
+            "spatial_index": spatial_summary,
             "idempotent": False,
         }
     finally:
@@ -1131,6 +1137,7 @@ def apply_changes(db_path: str, change_path: str, sync: SyncPoint | None = None)
                 "affected_relations": receipt_relations,
                 "recomputed_relations": sorted(affected),
                 "fetched": view.stats.as_dict(),
+                "spatial_index": dbmod.get_meta(conn, "spatial_index"),
                 "limits": {"ways": max_ways, "nodes": max_nodes},
             }
             conn.execute(
@@ -1305,6 +1312,13 @@ def _write_revision(conn, head, new_revision, changes, change_entries,
         }
         receipt_relations.append(entry)
     _mirror_legacy_results(conn, new_revision, mirror)
+    # update the persistent spatial candidate index inside the same
+    # transaction as the revision: deleted relations, relations that became
+    # incomplete/topology_conflict and relations without faces simply have
+    # no index rows for this revision, while older revisions' rows remain
+    # untouched.  Any failure rolls back head, geometry and index together.
+    spatial_summary = spatial.index_revision(conn, new_revision)
+    dbmod.set_meta(conn, "spatial_index", spatial_summary)
     return receipt_relations
 
 
