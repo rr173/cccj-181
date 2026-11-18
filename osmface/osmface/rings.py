@@ -118,6 +118,17 @@ def _signed_area(coords) -> float:
     return area / 2.0
 
 
+def _node_sort_key(node_id):
+    """Total order over node identities.
+
+    Main-warehouse node ids are integers; offline work copies may carry
+    local node names (strings) through the same ring assembly.  Integer
+    ids order exactly as before; strings sort after all integers, so a
+    pure-integer ring picks the identical start node as the legacy rule.
+    """
+    return (1, node_id) if isinstance(node_id, str) else (0, node_id)
+
+
 def canonicalize_ring(ring_nodes, frag_occ_rev, role, ways_nodes, coords_of):
     """Normalize orientation and start node; rebuild segment provenance.
 
@@ -136,7 +147,7 @@ def canonicalize_ring(ring_nodes, frag_occ_rev, role, ways_nodes, coords_of):
         ring_nodes = core + [core[0]]
         frag_occ_rev = [(occ, not rev) for occ, rev in reversed(frag_occ_rev)]
     core = ring_nodes[:-1]
-    k = min(range(len(core)), key=lambda i: core[i])
+    k = min(range(len(core)), key=lambda i: _node_sort_key(core[i]))
     core = core[k:] + core[:k]
     ring_nodes = core + [core[0]]
 

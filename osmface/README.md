@@ -188,6 +188,7 @@ pkg = osmface.export_revision_package("w.db", "out/r1", revision=1)
 （另有 `revision.json`、`batches.jsonl`），来源字段全部取自该修订的历史表，
 不从当前实体表回填。已导出的目录不会被后续 apply 改写；写出失败只留下
 `building`/`failed` 标记，不会出现可当成完整包的目录，也不回滚已提交的修订。
+合流产生的修订在 `revision.json` 里标记为 `kind="merge"` 并记录 `merge_id`。
 
 ### 崩溃、并发与确定性测试同步点
 
@@ -199,7 +200,141 @@ pkg = osmface.export_revision_package("w.db", "out/r1", revision=1)
 `OSMFACE_SYNC_DIR` 后，apply 在 `validated` / `precommit` / `committed` 阶段写入
 `reached-<phase>`；放置 `wait-<phase>` 会阻塞到出现 `proceed-<phase>`，放置
 `crash-<phase>` 则以退出码 17 在该阶段确定性终止。`OSMFACE_BUSY_TIMEOUT`
-（毫秒）可调锁等待，便于争用验收快速失败。
+（毫秒）可调锁等待，便于争用验收快速失败。合流确认（merge-confirm）使用同一
+同步点协议。
+
+## 离线工作副本与合流
+
+外业小组可以领取一份离线工作副本，断开主库独立修改、预览，回来后把资料包交给
+资料库审阅合流。整条链路：**领取 → 离线编辑/预览 → 导出资料包 → 制订合流方案 →
+裁定冲突 → 预览候选 → 确认合流 → 查回执**。
+
+### 来源身份与领取（checkout）
+
+每个已启用历史的资料库都有稳定的 `source_id`（启用时生成；更早的库在首次需要时
+补发并持久化，重复领取、进程重开都不会改变）。领取从指定修订（省略时为当时头）
+流式复制一次实体快照——含实体定义、墓碑与对象版本——不复制全部历史、既有导出
+或运行垃圾。副本记录它来自哪一个资料库、哪一个修订；内容相同但没有共同来源的
+两个库不能互相收件。领取后副本不再打开主库路径，可在新进程里离线工作。
+
+```bash
+python3 -m osmface source-id main.db
+python3 -m osmface checkout main.db fieldA.db            # 固定当时头修订
+python3 -m osmface checkout main.db fieldB.db --revision 3
+python3 -m osmface wc-info fieldA.db
+```
+
+### 离线编辑（wc-edit）与预览（wc-preview）
+
+编辑文件是 UTF-8 JSONL：首行批头 `{"edit_id","base_edit"}`，其后每行一个
+put/delete。`base_edit` 必须等于副本当前编辑头，防止用过期副本头覆盖他人已写入
+的离线编辑；`edit_id` 绑定文件字节，同 id 同字节重送返回原回执，同 id 不同字节
+拒绝。已有对象用主库整数 id（`expected_version` 对副本内版本）；野外新建对象用
+副本内局部名称（按实体类型分域、按副本隔离，两份副本的 `n1` 互不相干）：
+
+```json
+{"edit_id":"day1","base_edit":0}
+{"op":"put","expected_version":1,"entity":{"type":"node","id":7,"x":12,"y":4}}
+{"op":"delete","expected_version":2,"type":"way","id":20}
+{"op":"put","expected_version":0,"entity":{"type":"node","local_id":"n1","x":5,"y":5}}
+{"op":"put","expected_version":0,"entity":{"type":"way","local_id":"w1",
+  "nodes":[7,{"local":"n1"},7]}}
+{"op":"put","expected_version":0,"entity":{"type":"relation","local_id":"r1",
+  "members":[{"type":"way","ref":{"local":"w1"},"role":"outer"}]}}
+```
+
+- 局部名称是 1–64 位 `[A-Za-z0-9_.-]` 且不得是整数字面量，与整数 id 明确区分；
+  引用写成 `{"local":"n1"}`。不占用负数充当临时空间（负数本来就是合法主库 id）。
+- 同批按最终状态解释，允许 way 先引用同批稍后才创建的对象；失败不留半批，
+  不消费 `edit_id`，不移动副本编辑头。
+- 每批完成时，指向局部名称的引用必须指向已定义且存活的同类对象；主库整数引用
+  仍可缺失，预览按既有规则显示 `incomplete` / `topology_conflict`。
+- 副本内不能新建整数 id（新对象只能走局部名称）；可对已有对象修改/删除，也可
+  反复修改、删除、恢复局部对象（版本续接）。
+- 离线编辑与预览只动副本文件，绝不移动主库头。
+
+`wc-preview` 用同一套装配程序（缺口传播、组环、嵌套、溯源）装配副本当前状态，
+输出区分主库整数身份与外业局部名称。
+
+### 资料包（wc-export）
+
+`wc-export` 把固定副本头导出为可搬运目录：`manifest.json`（状态机写出，
+`building`→原子改名→`complete`）、`provenance.json`（来源身份、领取基线、
+副本头、三份真实摘要）、`baseline.jsonl`（领取基线快照，含版本与墓碑）、
+`edits.jsonl`（相对基线的净最终修改；已删除的局部对象不留下痕迹）。
+manifest 绑定每个文件的长度与真实 SHA256；重新打开包不依赖副本目录或主库原路径。
+缺件、内容损坏、类型错误、重复身份、自填来源与摘要不符都会被拒绝；manifest 里的
+路径只接受裸文件名，绝不当作任意宿主路径。
+
+### 合流方案（merge-plan / merge-show / merge-rule）
+
+收件人先生成并持久保存合流方案，而不是直接 apply。方案固定包内容、副本头、
+领取基线 B 与接收时的主库头 H，并逐对象比较 B、外业最终状态 L、H 三侧的
+**业务定义**（存活/删除 + 坐标或完整有序引用列表；不含对象版本号）：
+
+- `L == B` → 保留主库修改（keep_main）；`H == B` → 采用外业修改（take_field）；
+  `L == H` → 接受共同状态（same）；其余为待裁定冲突。
+- 坐标对、way 整条节点序列、relation 整条成员序列都作为完整对象比较：换序、
+  重复出现次数、角色变化都算定义变化，不按字段或列表位置拼接。
+- 删除（墓碑，有版本依据）与从未存在是不同身份；删除后恢复到相同定义、
+  不改内容仅版本不同，不算内容冲突。
+- 方案同时列出自动保留的主库修改、拟接入的外业修改（含全部存活局部对象，
+  即使未被 relation 引用）与待裁定冲突的三侧原值。
+
+裁定分步保存（`merge-rule`，JSON 文件）：每个冲突可选主库一侧、外业一侧、
+领取基线，或给一个经过校验的完整自定义定义/删除决定；对没有内容冲突但需要
+修复组合引用的已有对象，也可显式添加完整自定义覆盖（须填原因）。方案里看得到
+三侧原值、自动结果、覆盖内容与原因；未知对象或失效裁定直接拒绝，不会混入执行。
+每次裁定后都对整份候选状态重新解释引用：例如主库删了一个 node 而外业改的 way
+仍在用它，方案会醒目列出该缺引用及受影响关系。几何诊断仅供审阅——合法的最终
+原始对象仍可按现有入仓规则接受为未完成/冲突状态。局部对象本身的修改靠重新编辑
+副本并导出新包，方案不会偷偷制造来源不明的局部身份。
+
+### 候选预览（merge-preview）
+
+预览用全部自动合并结果加当前裁定装配候选地图（不是只装配外业副本），给出受影响
+关系的状态、面与引用来源，并分清主库整数身份与外业局部身份。存在未裁定冲突时
+只显示冲突清单，不声称有可提交的完整预览。
+
+### 确认合流（merge-confirm / merge-receipt）
+
+确认时主库头必须仍是方案固定的 H，否则明确拒绝（另建方案即可，旧裁定不会被
+默默套到新主库上）。确认在一个事务里完成：为所有接入的新对象分配本资料库从未
+使用过的整数 id（墓碑也算占用，按类型分域，同一局部对象在一次合流中只有一个
+永久身份，不同副本的同名局部对象各分各的），把 node、way、嵌套 relation 中的
+局部引用一次性改写成永久 id，按主库现有修订机制落实体版本（已有对象的更改以
+H 的对象版本为前提，副本里的版本号从不抄进主库），复用既有受影响关系计算生成
+**一个**新修订；若裁定后相对 H 没有实体变化，则不制造空修订。回执记录稳定
+`merge_id`、包摘要、方案与裁定身份、B/H/结果修订、新身份分配表与变更对象；
+日后可从回执追到外业局部名称和领取时的版本。相同 `merge_id`+包+裁定重试找回
+原回执（即使主库后来推进），同 `merge_id` 换包或换裁定拒绝。`merge_id` 与直接
+apply 的 `batch_id` 是互不相通的两个命名空间。
+
+```bash
+# 完整命令链：从旧主库开始，两份外业资料汇回
+python3 -m osmface load main.db world.jsonl && python3 -m osmface assemble main.db
+python3 -m osmface enable-history main.db
+python3 -m osmface checkout main.db fieldA.db
+python3 -m osmface checkout main.db fieldB.db
+python3 -m osmface wc-edit fieldA.db editsA.jsonl
+python3 -m osmface wc-preview fieldA.db
+python3 -m osmface wc-export fieldA.db pkgA
+python3 -m osmface wc-edit fieldB.db editsB.jsonl
+python3 -m osmface wc-export fieldB.db pkgB
+python3 -m osmface apply main.db other-team.jsonl      # 主库继续前进
+python3 -m osmface merge-plan main.db pkgA             # → plan_id
+python3 -m osmface merge-show main.db plan-XXXX
+python3 -m osmface merge-rule main.db plan-XXXX rulings.json
+python3 -m osmface merge-preview main.db plan-XXXX
+python3 -m osmface merge-confirm main.db plan-XXXX --merge-id merge-A
+python3 -m osmface merge-receipt main.db merge-A
+python3 -m osmface merge-plan main.db pkgB             # 第二份同样合流
+```
+
+Python API 一一对应：`checkout_workcopy` / `workcopy_edit` / `workcopy_preview` /
+`workcopy_export` / `create_merge_plan` / `get_merge_plan` / `save_merge_rulings` /
+`merge_preview` / `confirm_merge` / `get_merge_receipt`（另有 `source_identity`、
+`workcopy_info`、`list_merge_plans`）。
 
 ## 夹具与测试
 
@@ -213,6 +348,8 @@ python3 fixtures/gen_scale.py /tmp/scale.jsonl \  # 规模数据：10 万未引�
 python3 -m pytest tests/ -q                       # 全部测试
 python3 checks/demo_history.py                    # 修订仓端到端走查
 python3 checks/check_history.py                   # 鞋带公式 + 参考投影独立核对
+python3 checks/demo_merge.py                      # 离线合流端到端走查
+python3 checks/check_merge.py                     # 三方合并独立验收
 ```
 
 历史测试（`tests/test_history_*.py`）覆盖：启用前置条件与幂等、对象版本/墓碑/恢复、
@@ -220,6 +357,14 @@ python3 checks/check_history.py                   # 鞋带公式 + 参考投影�
 缺口与引用环的引入和解除、双写者争用、确定性中止与读写交错、SQLite authorizer 与
 `EXPLAIN QUERY PLAN` 证明的局部性，以及 `checks/reference_projection.py`
 （只解释变更语义、不调用任何生产变更/依赖/历史逻辑）逐修订对照普通全量装配。
+
+离线合流测试（`tests/test_workcopy.py`、`tests/test_merge_*.py`）覆盖：领取来源
+与快照内容、断主库后的独立编辑/预览、局部名称分域与整数区分、编辑批原子性与
+过期副本头、资料包完整性与自洽、三方逐对象判定（含删除/恢复/从未存在、有序重复
+成员）、两份副本同名局部对象的分配、交叉缺引用的诊断与自定义修复、未裁定/主库
+推进/重送等失败路径、确定性中止与合流-vs-直写争用、规模数据上的合流局部性。
+`checks/check_merge.py` 是独立于生产合并判定代码的验收：手写 B/L/H 三列清单
+逐对象算期望，候选原始对象独立物料化后送入原装配器做几何对照。
 规模数据运行时生成，不入库。
 
 基准夹具 `base.jsonl`：四个乱向 way 拼成 10×10 外方环（100），子关系 C 含
@@ -239,6 +384,8 @@ osmface/            # 包
   nesting.py        # 最小包含父环、角色交替、面构造
   assemble.py       # 缺口传播、展开（含共享子关系编译缓存）、限额、落库
   history.py        # 版本化实体/边/结果、原子 apply、反向依赖闭包、历史读
+  workcopy.py       # 离线工作副本：领取、编辑、预览、资料包导出
+  merge.py          # 合流：包校验、三方方案、裁定、候选预览、原子确认
   export.py         # 入仓包与修订包状态机写出
   model.py          # 常量、异常、确定性测试同步点 SyncPoint
   api.py / cli.py   # Python API 与 load/assemble/inspect/enable-history/apply 等命令

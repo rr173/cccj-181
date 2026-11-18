@@ -134,6 +134,246 @@ def _cmd_export_revision(args) -> int:
     return EXIT_OK
 
 
+def _cmd_source_id(args) -> int:
+    _print_json(api.source_identity(args.db))
+    return EXIT_OK
+
+
+def _cmd_checkout(args) -> int:
+    summary = api.checkout_workcopy(
+        args.db, args.workcopy, revision=args.revision, force=args.force
+    )
+    print(
+        "checkout: {wc} source={src} base_revision={rev} entities={n}"
+        " baseline={sha}".format(
+            wc=summary["workcopy"],
+            src=summary["source_id"][:12],
+            rev=summary["base_revision"],
+            n=summary["entities"],
+            sha=summary["baseline_sha256"][:12],
+        )
+    )
+    return EXIT_OK
+
+
+def _cmd_wc_info(args) -> int:
+    _print_json(api.workcopy_info(args.workcopy))
+    return EXIT_OK
+
+
+def _cmd_wc_edit(args) -> int:
+    receipt = api.workcopy_edit(args.workcopy, args.edits)
+    if args.json:
+        _print_json(receipt)
+        return EXIT_OK
+    print(
+        "wc-edit: edit_id={eid} {base}->{head} changes={n}".format(
+            eid=receipt["edit_id"],
+            base=receipt["base_edit"],
+            head=receipt["edit_head"],
+            n=len(receipt["changes"]),
+        )
+    )
+    return EXIT_OK
+
+
+def _cmd_wc_preview(args) -> int:
+    preview = api.workcopy_preview(args.workcopy, relation_id=args.relation)
+    if args.json:
+        _print_json(preview)
+        return EXIT_OK
+    counts = preview["status_counts"]
+    print(
+        "wc-preview: base_revision={rev} edit_head={head} relations={n}"
+        " complete={c} incomplete={i} topology_conflict={t}".format(
+            rev=preview["base_revision"],
+            head=preview["edit_head"],
+            n=preview["relations"],
+            c=counts["complete"],
+            i=counts["incomplete"],
+            t=counts["topology_conflict"],
+        )
+    )
+    rel = preview.get("relation")
+    if rel is not None:
+        print(f"  relation {rel['relation']}: status={rel['status']}")
+        if rel.get("reason"):
+            print(f"    reason: {json.dumps(rel['reason'], sort_keys=True)}")
+        for i, face in enumerate(rel.get("faces") or []):
+            print(f"    face {i}:")
+            for ring in face["rings"]:
+                kind = "hole " if ring["hole"] else "shell"
+                print(f"      ring {kind} role={ring['role']}"
+                      f" nodes={ring['nodes']}")
+                for seg in ring["segments"]:
+                    print(
+                        "        way={way} path={path} reversed={rev}"
+                        " nodes={nodes}".format(
+                            way=seg["way"], path=seg["path"],
+                            rev=seg["reversed"], nodes=seg["nodes"],
+                        )
+                    )
+    return EXIT_OK
+
+
+def _cmd_wc_export(args) -> int:
+    manifest = api.workcopy_export(args.workcopy, args.package,
+                                   force=args.force)
+    print(
+        "wc-export: {pkg} state={state} package_id={pid}".format(
+            pkg=args.package,
+            state=manifest["state"],
+            pid=manifest["package_id"][:12],
+        )
+    )
+    return EXIT_OK
+
+
+def _cmd_merge_plan(args) -> int:
+    plan = api.create_merge_plan(args.db, args.package)
+    if args.json:
+        _print_json(plan)
+        return EXIT_OK
+    _print_plan_summary(plan)
+    return EXIT_OK
+
+
+def _print_plan_summary(plan) -> None:
+    auto_keep = [d for d in plan["decisions"] if d["decision"] == "keep_main"]
+    auto_field = [d for d in plan["decisions"] if d["decision"] == "take_field"]
+    auto_same = [d for d in plan["decisions"] if d["decision"] == "same"]
+    conflicts = [d for d in plan["decisions"] if d["decision"] == "conflict"]
+    print(
+        "merge-plan: {pid} status={st} B={b} H={h} package={pkg}".format(
+            pid=plan["plan_id"], st=plan["status"],
+            b=plan["base_revision"], h=plan["head_revision"],
+            pkg=plan["package_id"][:12],
+        )
+    )
+    print(
+        "  keep_main={k} take_field={f} same={s} conflicts={c}"
+        " new_local_objects={n} unresolved={u}".format(
+            k=len(auto_keep), f=len(auto_field), s=len(auto_same),
+            c=len(conflicts), n=len(plan["locals"]),
+            u=len(plan["unresolved_conflicts"]),
+        )
+    )
+    for d in conflicts:
+        print("  conflict: {t} {i}".format(t=d["type"], i=d["id"]))
+    for g in plan["reference_gaps"][:10]:
+        frm = g["from"]
+        miss = g["missing"]
+        print(
+            "  reference gap: {ft} {fi} -> missing {mt} {mi}".format(
+                ft=frm["type"], fi=frm.get("id") or frm.get("local_id"),
+                mt=miss["type"], mi=miss.get("id") or miss.get("local_id"),
+            )
+        )
+
+
+def _cmd_merge_show(args) -> int:
+    plan = api.get_merge_plan(args.db, args.plan_id)
+    if args.json:
+        _print_json(plan)
+        return EXIT_OK
+    _print_plan_summary(plan)
+    for d in plan["decisions"]:
+        ruling = d.get("ruling")
+        line = "  {t} {i}: {dec}".format(t=d["type"], i=d["id"],
+                                         dec=d["decision"])
+        if ruling:
+            line += " ruling={ch}".format(ch=ruling["choice"])
+        if d.get("final"):
+            line += " final={st}".format(st=d["final"]["state"])
+        print(line)
+    return EXIT_OK
+
+
+def _cmd_merge_rule(args) -> int:
+    with open(args.rulings, encoding="utf-8") as fh:
+        rulings = json.load(fh)
+    plan = api.save_merge_rulings(args.db, args.plan_id, rulings)
+    if args.json:
+        _print_json(plan)
+        return EXIT_OK
+    print(
+        "merge-rule: {pid} saved={n} unresolved={u}".format(
+            pid=plan["plan_id"],
+            n=plan["rulings_saved"],
+            u=len(plan["unresolved_conflicts"]),
+        )
+    )
+    for g in plan["reference_gaps"][:10]:
+        frm, miss = g["from"], g["missing"]
+        print(
+            "  reference gap: {ft} {fi} -> missing {mt} {mi}".format(
+                ft=frm["type"], fi=frm.get("id") or frm.get("local_id"),
+                mt=miss["type"], mi=miss.get("id") or miss.get("local_id"),
+            )
+        )
+    return EXIT_OK
+
+
+def _cmd_merge_preview(args) -> int:
+    preview = api.merge_preview(args.db, args.plan_id)
+    if args.json:
+        _print_json(preview)
+        return EXIT_OK
+    if not preview["complete"]:
+        print(
+            "merge-preview: INCOMPLETE - {n} unresolved conflicts".format(
+                n=len(preview["unresolved_conflicts"])
+            )
+        )
+        for c in preview["unresolved_conflicts"]:
+            print("  unresolved: {t} {i}".format(t=c["type"], i=c["id"]))
+        return EXIT_DOMAIN
+    print(
+        "merge-preview: complete affected={affected}".format(
+            affected=preview["affected_relations"],
+        )
+    )
+    for rid, rel in preview["relations"].items():
+        print(f"  relation {rid}: {rel['status']}")
+    for g in preview["reference_gaps"][:10]:
+        frm, miss = g["from"], g["missing"]
+        print(
+            "  reference gap: {ft} {fi} -> missing {mt} {mi}".format(
+                ft=frm["type"], fi=frm.get("id") or frm.get("local_id"),
+                mt=miss["type"], mi=miss.get("id") or miss.get("local_id"),
+            )
+        )
+    return EXIT_OK
+
+
+def _cmd_merge_confirm(args) -> int:
+    receipt = api.confirm_merge(args.db, args.plan_id, args.merge_id)
+    if args.json:
+        _print_json(receipt)
+        return EXIT_OK
+    print(
+        "merge-confirm: merge_id={mid} {h}->{r} changes={n}"
+        " allocation={alloc}".format(
+            mid=receipt["merge_id"],
+            h=receipt["head_revision"],
+            r=receipt["result_revision"],
+            n=len(receipt["changes"]),
+            alloc=receipt["allocation"],
+        )
+    )
+    return EXIT_OK
+
+
+def _cmd_merge_receipt(args) -> int:
+    _print_json(api.get_merge_receipt(args.db, args.merge_id))
+    return EXIT_OK
+
+
+def _cmd_merge_list(args) -> int:
+    _print_json(api.list_merge_plans(args.db))
+    return EXIT_OK
+
+
 def _print_human(info, args) -> None:
     print(f"staging_state: {info['staging_state']}")
     if info.get("history_enabled"):
@@ -255,6 +495,107 @@ def build_parser() -> argparse.ArgumentParser:
     p_ex.add_argument("--force", action="store_true",
                       help="replace an existing output package")
     p_ex.set_defaults(func=_cmd_export_revision)
+
+    p_sid = sub.add_parser(
+        "source-id", help="show the warehouse's stable source identity"
+    )
+    p_sid.add_argument("db", help="history-enabled SQLite database path")
+    p_sid.set_defaults(func=_cmd_source_id)
+
+    p_co = sub.add_parser(
+        "checkout", help="create a self-contained offline work copy"
+    )
+    p_co.add_argument("db", help="history-enabled SQLite database path")
+    p_co.add_argument("workcopy", help="work copy SQLite path to create")
+    p_co.add_argument("--revision", type=int, default=None,
+                      help="revision to pin (default: current head)")
+    p_co.add_argument("--force", action="store_true",
+                      help="replace an existing work copy file")
+    p_co.set_defaults(func=_cmd_checkout)
+
+    p_wi = sub.add_parser("wc-info", help="show work copy provenance/state")
+    p_wi.add_argument("workcopy", help="work copy SQLite path")
+    p_wi.set_defaults(func=_cmd_wc_info)
+
+    p_we = sub.add_parser("wc-edit", help="apply an offline edit batch")
+    p_we.add_argument("workcopy", help="work copy SQLite path")
+    p_we.add_argument("edits", help="JSONL edit file (header + put/delete)")
+    p_we.add_argument("--json", action="store_true",
+                      help="print the full edit receipt")
+    p_we.set_defaults(func=_cmd_wc_edit)
+
+    p_wp = sub.add_parser(
+        "wc-preview", help="preview the work copy with the assembly rules"
+    )
+    p_wp.add_argument("workcopy", help="work copy SQLite path")
+    p_wp.add_argument("--relation", help="show one relation (id or local name)")
+    p_wp.add_argument("--json", action="store_true",
+                      help="machine-readable output")
+    p_wp.set_defaults(func=_cmd_wc_preview)
+
+    p_wx = sub.add_parser(
+        "wc-export", help="export the copy head as a transport package"
+    )
+    p_wx.add_argument("workcopy", help="work copy SQLite path")
+    p_wx.add_argument("package", help="output package directory")
+    p_wx.add_argument("--force", action="store_true",
+                      help="replace an existing package directory")
+    p_wx.set_defaults(func=_cmd_wc_export)
+
+    p_mp = sub.add_parser(
+        "merge-plan", help="validate a package and persist a merge plan"
+    )
+    p_mp.add_argument("db", help="history-enabled SQLite database path")
+    p_mp.add_argument("package", help="transport package directory")
+    p_mp.add_argument("--json", action="store_true",
+                      help="machine-readable output")
+    p_mp.set_defaults(func=_cmd_merge_plan)
+
+    p_ms = sub.add_parser("merge-show", help="show a persisted merge plan")
+    p_ms.add_argument("db", help="history-enabled SQLite database path")
+    p_ms.add_argument("plan_id", help="plan identity")
+    p_ms.add_argument("--json", action="store_true",
+                      help="machine-readable output")
+    p_ms.set_defaults(func=_cmd_merge_show)
+
+    p_ml = sub.add_parser("merge-list", help="list merge plans")
+    p_ml.add_argument("db", help="history-enabled SQLite database path")
+    p_ml.set_defaults(func=_cmd_merge_list)
+
+    p_mr = sub.add_parser(
+        "merge-rule", help="save conflict rulings / custom overrides"
+    )
+    p_mr.add_argument("db", help="history-enabled SQLite database path")
+    p_mr.add_argument("plan_id", help="plan identity")
+    p_mr.add_argument("rulings", help="JSON file with the rulings")
+    p_mr.add_argument("--json", action="store_true",
+                      help="machine-readable output")
+    p_mr.set_defaults(func=_cmd_merge_rule)
+
+    p_mv = sub.add_parser(
+        "merge-preview", help="preview the ruled candidate map"
+    )
+    p_mv.add_argument("db", help="history-enabled SQLite database path")
+    p_mv.add_argument("plan_id", help="plan identity")
+    p_mv.add_argument("--json", action="store_true",
+                      help="machine-readable output")
+    p_mv.set_defaults(func=_cmd_merge_preview)
+
+    p_mc = sub.add_parser(
+        "merge-confirm", help="land the ruled plan as one revision"
+    )
+    p_mc.add_argument("db", help="history-enabled SQLite database path")
+    p_mc.add_argument("plan_id", help="plan identity")
+    p_mc.add_argument("--merge-id", required=True,
+                      help="stable merge identity for idempotent retries")
+    p_mc.add_argument("--json", action="store_true",
+                      help="print the full merge receipt")
+    p_mc.set_defaults(func=_cmd_merge_confirm)
+
+    p_mrc = sub.add_parser("merge-receipt", help="read one merge receipt")
+    p_mrc.add_argument("db", help="history-enabled SQLite database path")
+    p_mrc.add_argument("merge_id", help="merge identity of the receipt")
+    p_mrc.set_defaults(func=_cmd_merge_receipt)
     return parser
 
 

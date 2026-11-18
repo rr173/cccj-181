@@ -2,12 +2,25 @@
 from .api import (
     apply_changes,
     assemble_database,
+    checkout_workcopy,
+    confirm_merge,
+    create_merge_plan,
     enable_history,
     export_revision_package,
+    get_merge_plan,
+    get_merge_receipt,
     get_receipt,
     inspect_database,
     inspect_package,
+    list_merge_plans,
     load_database,
+    merge_preview,
+    save_merge_rulings,
+    source_identity,
+    workcopy_edit,
+    workcopy_export,
+    workcopy_info,
+    workcopy_preview,
 )
 from .model import (
     ABSENT,
@@ -17,10 +30,15 @@ from .model import (
     BatchError,
     BatchIdConflict,
     HistoryError,
+    MergeConflict,
+    MergeError,
     NotHistoryError,
     OsmFaceError,
+    PackageError,
     RevisionConflict,
     SyncPoint,
+    WorkcopyConflict,
+    WorkcopyError,
 )
 
 __all__ = [
@@ -34,6 +52,20 @@ __all__ = [
     "get_receipt",
     "export_revision_package",
     "SyncPoint",
+    # offline work copies and merge intake
+    "source_identity",
+    "checkout_workcopy",
+    "workcopy_info",
+    "workcopy_edit",
+    "workcopy_preview",
+    "workcopy_export",
+    "create_merge_plan",
+    "get_merge_plan",
+    "list_merge_plans",
+    "save_merge_rulings",
+    "merge_preview",
+    "confirm_merge",
+    "get_merge_receipt",
     # statuses / errors
     "COMPLETE",
     "INCOMPLETE",
@@ -45,5 +77,10 @@ __all__ = [
     "BatchError",
     "BatchIdConflict",
     "RevisionConflict",
+    "WorkcopyError",
+    "WorkcopyConflict",
+    "PackageError",
+    "MergeError",
+    "MergeConflict",
 ]
-__version__ = "2.0.0"
+__version__ = "2.1.0"

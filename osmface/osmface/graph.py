@@ -9,6 +9,16 @@ from __future__ import annotations
 from collections import deque
 
 
+def _rid_sort_key(rid):
+    """Total order over relation identities.
+
+    Warehouse relation ids are integers; offline work copies may carry
+    local relation names (strings) through the same graph algorithms.
+    Integer ids order exactly as before; strings sort after all integers.
+    """
+    return (1, rid) if isinstance(rid, str) else (0, rid)
+
+
 def build_graph(relations: dict) -> dict:
     """rid -> sorted list of existing child relation ids."""
     graph = {}
@@ -61,7 +71,7 @@ def find_cycles(graph: dict) -> dict:
     counter = [0]
     cyclic = {}
 
-    for root in sorted(graph):
+    for root in sorted(graph, key=_rid_sort_key):
         if root in index_of:
             continue
         index_of[root] = low[root] = counter[0]
@@ -112,7 +122,7 @@ def postorder(relations: dict, skip: set) -> list:
     """
     order = []
     state = {}  # rid -> 1 (visiting) / 2 (done)
-    for root in sorted(relations):
+    for root in sorted(relations, key=_rid_sort_key):
         if root in skip or state.get(root) == 2:
             continue
         stack = [(root, False)]

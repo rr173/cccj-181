@@ -18,6 +18,8 @@ from .assemble import (
 )
 from .export import export_package, export_revision, read_manifest
 from . import history as hist
+from . import merge as mergemod
+from . import workcopy as wcmod
 from .model import ABSENT, STATUSES
 
 
@@ -156,6 +158,87 @@ def export_revision_package(db_path: str, out_dir: str, revision: int | None = N
         return export_revision(conn, out_dir, revision, force=force)
     finally:
         hist.close(conn)
+
+
+# ---------------------------------------------------------------------------
+# offline work copies and merge intake
+# ---------------------------------------------------------------------------
+
+def source_identity(db_path: str) -> dict:
+    """The warehouse's stable source identity (minted once, then reused)."""
+    conn = hist.connect(db_path)
+    try:
+        hist._require_history(conn)
+        return {"source_id": hist.ensure_source_id(conn)}
+    finally:
+        hist.close(conn)
+
+
+def checkout_workcopy(db_path: str, workcopy_path: str,
+                      revision: int | None = None, force: bool = False) -> dict:
+    """Create a self-contained offline work copy at a pinned revision."""
+    return wcmod.checkout_workcopy(db_path, workcopy_path,
+                                   revision=revision, force=force)
+
+
+def workcopy_info(workcopy_path: str) -> dict:
+    """Provenance and edit-head state of one work copy."""
+    conn = wcmod.connect_workcopy(workcopy_path)
+    try:
+        return wcmod.workcopy_info(conn)
+    finally:
+        conn.close()
+
+
+def workcopy_edit(workcopy_path: str, edit_file: str) -> dict:
+    """Apply one offline edit batch to a work copy; return its receipt."""
+    return wcmod.workcopy_edit(workcopy_path, edit_file)
+
+
+def workcopy_preview(workcopy_path: str, relation_id=None) -> dict:
+    """Preview the copy's current state with the ordinary assembly rules."""
+    return wcmod.workcopy_preview(workcopy_path, relation_id=relation_id)
+
+
+def workcopy_export(workcopy_path: str, package_dir: str,
+                    force: bool = False) -> dict:
+    """Export the fixed copy head as a portable transport package."""
+    return wcmod.workcopy_export(workcopy_path, package_dir, force=force)
+
+
+def create_merge_plan(db_path: str, package_dir: str) -> dict:
+    """Validate a transport package and persist a merge plan."""
+    return mergemod.create_merge_plan(db_path, package_dir)
+
+
+def get_merge_plan(db_path: str, plan_id: str) -> dict:
+    """The plan with current rulings, candidate states and diagnostics."""
+    return mergemod.get_merge_plan(db_path, plan_id)
+
+
+def list_merge_plans(db_path: str) -> list:
+    return mergemod.list_merge_plans(db_path)
+
+
+def save_merge_rulings(db_path: str, plan_id: str, rulings) -> dict:
+    """Save conflict rulings / custom overrides onto an open plan."""
+    return mergemod.save_merge_rulings(db_path, plan_id, rulings)
+
+
+def merge_preview(db_path: str, plan_id: str) -> dict:
+    """Candidate map preview from automatic results + current rulings."""
+    return mergemod.merge_preview(db_path, plan_id)
+
+
+def confirm_merge(db_path: str, plan_id: str, merge_id: str,
+                  sync: hist.SyncPoint | None = None) -> dict:
+    """Land the ruled plan as one warehouse revision; return the receipt."""
+    return mergemod.confirm_merge(db_path, plan_id, merge_id, sync=sync)
+
+
+def get_merge_receipt(db_path: str, merge_id: str) -> dict:
+    """Read the receipt of a previously committed merge."""
+    return mergemod.get_merge_receipt(db_path, merge_id)
 
 
 def _relation_detail(conn, rid: int) -> dict | None:

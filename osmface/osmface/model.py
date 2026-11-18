@@ -81,6 +81,27 @@ class BatchInProgress(HistoryError):
     """A writer holds the apply lock; retry rather than partially commit."""
 
 
+class WorkcopyError(OsmFaceError):
+    """Base class for offline work-copy failures (checkout/edit/preview)."""
+
+
+class WorkcopyConflict(WorkcopyError):
+    """The edit file's base_edit is stale or the copy is otherwise unusable."""
+
+
+class PackageError(OsmFaceError):
+    """A transport package is missing pieces, corrupt, or mis-typed."""
+
+
+class MergeError(OsmFaceError):
+    """Base class for merge plan/ruling/confirmation failures."""
+
+
+class MergeConflict(MergeError):
+    """The warehouse head moved past the plan's pinned head, or the merge
+    collides with a different already-received merge identity."""
+
+
 class SyncPoint:
     """Deterministic test hook for crash/interleave acceptance tests.
 

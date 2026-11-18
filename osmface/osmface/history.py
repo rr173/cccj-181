@@ -204,6 +204,35 @@ def is_history_enabled(conn) -> bool:
     return bool(dbmod.get_meta(conn, "history_enabled", False))
 
 
+def ensure_source_id(conn) -> str:
+    """Stable warehouse identity, minted once and persisted.
+
+    History-enabled databases need a durable source identity so offline
+    work copies can prove which warehouse they came from.  Minting never
+    touches revision data: it is one meta row, created at enable time for
+    new warehouses or lazily (and then reused forever) for older ones.
+    """
+    source_id = dbmod.get_meta(conn, "source_id")
+    if source_id:
+        return source_id
+    import uuid
+
+    source_id = uuid.uuid4().hex
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # re-check under the write lock: a concurrent minter wins
+        existing = dbmod.get_meta(conn, "source_id")
+        if existing:
+            conn.commit()
+            return existing
+        dbmod.set_meta(conn, "source_id", source_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return source_id
+
+
 def _require_history(conn) -> None:
     if not is_history_enabled(conn):
         raise NotHistoryError(
@@ -303,6 +332,10 @@ def enable_history(db_path: str) -> dict:
                 "history_budget",
                 {"ways": max_ways, "nodes": max_nodes},
             )
+            if not dbmod.get_meta(conn, "source_id"):
+                import uuid
+
+                dbmod.set_meta(conn, "source_id", uuid.uuid4().hex)
             conn.commit()
         except Exception:
             conn.rollback()
@@ -742,10 +775,11 @@ def _affected_relations(conn, changes, base_revision):
 # incremental assembly of the affected closure
 # ---------------------------------------------------------------------------
 
-def _forward_closure(conn, revision, affected: set):
+def _forward_closure(conn, revision, affected: set, view=None):
     """All relations needed to resolve ``affected``: the affected set plus
     its relation-child closure at the new revision."""
-    view = RevisionView(conn, revision)
+    if view is None:
+        view = RevisionView(conn, revision)
     closure = set(affected)
     stack = list(affected)
     while stack:
@@ -781,20 +815,25 @@ def _load_cached_outcome(conn, revision, rid):
     )
 
 
-def _recompute(conn, new_revision, affected: set, max_ways, max_nodes):
+def _recompute(conn, new_revision, affected: set, max_ways, max_nodes,
+               view=None, cache_revision=None):
     """Resolve exactly the affected relations at the new revision.
 
     Non-affected children keep their cached outcomes; geometry fetches are
-    bounded by the affected closure.
+    bounded by the affected closure.  ``view`` may serve a not-yet-committed
+    candidate state (merge preview); cached outcomes then come from
+    ``cache_revision`` instead of ``new_revision - 1``.
     """
-    closure, view = _forward_closure(conn, new_revision, set(affected))
+    if cache_revision is None:
+        cache_revision = new_revision - 1
+    closure, view = _forward_closure(conn, new_revision, set(affected), view=view)
     relations = view.relations_map(closure)
     # include definitions of cached (out-of-closure) children so the seam's
     # gap analysis sees every real reference
     cached = {}
     extra_defs = {}
     for rid in closure - affected:
-        out = _load_cached_outcome(conn, new_revision - 1, rid)
+        out = _load_cached_outcome(conn, cache_revision, rid)
         if out is not None:
             cached[rid] = out
             extra_defs[rid] = view.relation(rid)
@@ -804,7 +843,7 @@ def _recompute(conn, new_revision, affected: set, max_ways, max_nodes):
                 definition = view.relation(child)
                 if definition is not None:
                     extra_defs[child] = definition
-                    out = _load_cached_outcome(conn, new_revision - 1, child)
+                    out = _load_cached_outcome(conn, cache_revision, child)
                     if out is not None:
                         cached[child] = out
     relations.update({k: v for k, v in extra_defs.items() if v is not None})
@@ -1426,21 +1465,46 @@ def list_batches(conn):
 
 
 def revision_identity(conn, revision):
-    """Revision metadata incl. the batch that produced it (rev 0 = base)."""
+    """Revision metadata incl. the batch/merge that produced it (rev 0 =
+    baseline)."""
     revision = _pin_revision(conn, revision)
     identity = {"revision": revision, "head_revision": head_revision(conn)}
     if revision == 0:
         identity.update(batch_id=None, kind="baseline")
-    else:
-        row = conn.execute(
-            "SELECT batch_id, sha256, committed_at FROM batch_registry"
-            " WHERE revision = ?",
-            (revision,),
-        ).fetchone()
+        return identity
+    row = conn.execute(
+        "SELECT batch_id, sha256, committed_at FROM batch_registry"
+        " WHERE revision = ?",
+        (revision,),
+    ).fetchone()
+    if row is not None:
         identity.update(
             batch_id=row["batch_id"],
             input_sha256=row["sha256"],
             committed_at=row["committed_at"],
             kind="batch",
         )
-    return identity
+        return identity
+    # merge revisions live in their own registry (never in batch_registry,
+    # so a merge_id can never collide with a batch_id)
+    tables = {
+        r["name"]
+        for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    if "merge_registry" in tables:
+        row = conn.execute(
+            "SELECT merge_id, plan_id, committed_at FROM merge_registry"
+            " WHERE result_revision = ?",
+            (revision,),
+        ).fetchone()
+        if row is not None:
+            identity.update(
+                merge_id=row["merge_id"],
+                plan_id=row["plan_id"],
+                committed_at=row["committed_at"],
+                kind="merge",
+            )
+            return identity
+    raise HistoryError(f"no batch or merge recorded for revision {revision}")
